@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react';
  */
 import { __, sprintf } from '@wordpress/i18n';
 import { Notice } from '@wordpress/components';
-import { dispatch } from '@wordpress/data';
+import { select, dispatch } from '@wordpress/data';
 import { Fragment } from '@wordpress/element';
 
 /**
@@ -28,6 +28,7 @@ import {
  */
 
 const FUTURE_SUPPORT_NOTICE_ID = 'revisions-extended-future-support-notice';
+const POST_AUTOSAVE_LOCK_ID = 'revisions-extended-lock';
 
 const UpdateButtonModifier = () => {
 	const [ newRevision, setNewRevision ] = useState();
@@ -39,6 +40,42 @@ const UpdateButtonModifier = () => {
 		getEditedPostAttribute,
 	} = usePost();
 	const { fetchTypes, getTypeInfo } = useTypes();
+
+	/**
+	 * Clear the current post edits to avoid triggering dirty state
+	 */
+	const clearPostEdits = async () => {
+		const entity = {
+			kind: 'postType',
+			name: savedPost.type,
+			id: savedPost.id,
+		};
+
+		const edits = select( 'core' ).getEntityRecordEdits(
+			entity.kind,
+			entity.name,
+			entity.id
+		);
+
+		if ( ! edits ) {
+			return;
+		}
+
+		const clearedEdits = {};
+
+		// Setting them to undefined will effectively clear them.
+		Object.keys( edits ).forEach( ( e ) => {
+			clearedEdits[ e ] = undefined;
+		} );
+
+		return await dispatch( 'core' ).editEntityRecord(
+			entity.kind,
+			entity.name,
+			entity.id,
+			clearedEdits,
+			{ undoIgnore: true }
+		);
+	};
 
 	const _savePost = async () => {
 		const isFutureRevision = changingToScheduled();
@@ -66,7 +103,7 @@ const UpdateButtonModifier = () => {
 		const types = await fetchTypes();
 
 		if ( ! types ) {
-			dispatch( 'core/notices' ).createNotice(
+			noticeDispatch.createNotice(
 				'error',
 				__(
 					'Error creating update: missing post type info.',
@@ -74,6 +111,10 @@ const UpdateButtonModifier = () => {
 				)
 			);
 		}
+
+		const editorDispatch = dispatch( 'core/editor' );
+		// Lock the post autosaves to stop updates.
+		await editorDispatch.lockPostAutosaving( POST_AUTOSAVE_LOCK_ID );
 
 		const { data, error } = await create( {
 			restBase: types[ savedPost.type ].rest_base,
@@ -86,10 +127,12 @@ const UpdateButtonModifier = () => {
 		} );
 
 		if ( error ) {
-			dispatch( 'core/notices' ).createNotice(
+			noticeDispatch.createNotice(
 				'error',
 				__( 'Error creating update.', 'revisions-extended' )
 			);
+
+			await editorDispatch.unlockPostAutosaving( POST_AUTOSAVE_LOCK_ID );
 		}
 
 		if ( data ) {
@@ -104,6 +147,14 @@ const UpdateButtonModifier = () => {
 			},
 		} );
 	}, [] );
+
+	useEffect( () => {
+		if ( newRevision ) {
+			( async () => {
+				await clearPostEdits();
+			} )();
+		}
+	}, [ newRevision ] );
 
 	if ( newRevision ) {
 		return (
